@@ -4,6 +4,7 @@
 #include <exception>
 #include <new>
 #include <bit>
+#include <numeric>
 #include <iterator>
 #include <string_view>
 #include <string>
@@ -127,22 +128,25 @@ namespace
 		if (volume == INVALID_HANDLE_VALUE)
 			throw_last_error();
 
-		STORAGE_DEVICE_NUMBER storage_device;
-		STORAGE_PROPERTY_QUERY storage_query_property = {
-			.PropertyId = StorageAccessAlignmentProperty
-		};
 		STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR storage_alignment_desc;
-		if (DWORD num_bytes_returned; !DeviceIoControl(volume, IOCTL_STORAGE_QUERY_PROPERTY, &storage_query_property, sizeof(storage_query_property), &storage_alignment_desc, sizeof(storage_alignment_desc), &num_bytes_returned, nullptr))
-			throw_last_error();
+		{
+			STORAGE_PROPERTY_QUERY storage_query_property = {
+				.PropertyId = StorageAccessAlignmentProperty
+			};
+			if (DWORD num_bytes_returned; !DeviceIoControl(volume, IOCTL_STORAGE_QUERY_PROPERTY, &storage_query_property, sizeof(storage_query_property), &storage_alignment_desc, sizeof(storage_alignment_desc), &num_bytes_returned, nullptr))
+				throw_last_error();
+		}
 
 
 		LARGE_INTEGER file_size;
 		if (!GetFileSizeEx(file, &file_size))
 			throw_last_error();
 
-		constexpr long long buffer_size = 1024*1024*512;
-		constexpr int num_buffers = 4;
-		auto buffer = static_cast<std::byte*>(::operator new(buffer_size * num_buffers, std::align_val_t(4096)));
+		const long long min_read_size = std::lcm(std::lcm(33, 256), storage_alignment_desc.BytesPerPhysicalSector);
+		const long long read_size = min_read_size * (2 * 1024 * 1024 / min_read_size);
+		const long long buffer_alignment = std::lcm(storage_alignment_desc.BytesPerPhysicalSector, std::bit_ceil(storage_alignment_desc.BytesPerPhysicalSector));
+		const long long buffer_size = (read_size + buffer_alignment - 1) / buffer_alignment * buffer_alignment;
+		auto buffer = static_cast<std::byte*>(::operator new(buffer_size * num_buffers, std::align_val_t(buffer_alignment)));
 
 #if 1
 		// IORING_CAPABILITIES caps;
@@ -153,7 +157,7 @@ namespace
 
 		throw_error(BuildIoRingRegisterFileHandles(ioring, 1, &file, 1));
 
-		IORING_BUFFER_INFO buffer_info = { buffer, buffer_size*num_buffers };
+		IORING_BUFFER_INFO buffer_info = { buffer, static_cast<UINT32>(buffer_size*num_buffers) };
 		throw_error(BuildIoRingRegisterBuffers(ioring, 1, &buffer_info, 2));
 
 		throw_error(SubmitIoRing(ioring, 2, INFINITE, nullptr));
@@ -165,12 +169,11 @@ namespace
 		throw_error(cqe.ResultCode);
 
 		long long read_offset = 0;
-		long long bytes_read = 0;
 
 		for (int i = 0; i < num_buffers; ++i)
 		{
-			throw_error(BuildIoRingReadFile(ioring, IoRingHandleRefFromIndex(0), IoRingBufferRefFromIndexAndOffset(0, i * buffer_size), buffer_size, read_offset, i, IOSQE_FLAGS_NONE));
-			read_offset += buffer_size;
+			throw_error(BuildIoRingReadFile(ioring, IoRingHandleRefFromIndex(0), IoRingBufferRefFromIndexAndOffset(0, i * buffer_size), read_size, read_offset, i, IOSQE_FLAGS_NONE));
+			read_offset += read_size;
 		}
 
 		while (true)
@@ -182,14 +185,14 @@ namespace
 			if (cqe.ResultCode != S_OK)
 				break;
 
-			long long read_size = std::min<long long>(file_size.QuadPart - read_offset, buffer_size);
+			long long num_bytes = std::min<long long>(file_size.QuadPart - read_offset, read_size);
 
 			int i = cqe.UserData;
-			throw_error(BuildIoRingReadFile(ioring, IoRingHandleRefFromIndex(0), IoRingBufferRefFromIndexAndOffset(0, i * buffer_size), read_size, read_offset, i, IOSQE_FLAGS_NONE));
-			read_offset += read_size;
+			throw_error(BuildIoRingReadFile(ioring, IoRingHandleRefFromIndex(0), IoRingBufferRefFromIndexAndOffset(0, i * buffer_size), num_bytes, read_offset, i, IOSQE_FLAGS_NONE));
+			read_offset += num_bytes;
 		}
 
-		bytes_read = read_offset;
+		long long bytes_read = read_offset;
 #else
 		HANDLE iocp = CreateIoCompletionPort(file, 0, 0, 0);
 
@@ -209,10 +212,10 @@ namespace
 				.OffsetHigh = static_cast<DWORD>(read_offset >> 32),
 			};
 
-			ReadFile(file, buffer + i * buffer_size, buffer_size, nullptr, o + i);
+			ReadFile(file, buffer + i * buffer_size, read_size, nullptr, o + i);
 			if (DWORD err = GetLastError(); err != ERROR_IO_PENDING)
 				throw_last_error(err);
-			read_offset += buffer_size;
+			read_offset += read_size;
 		}
 
 		auto read = [&, read_offset = std::atomic_ref<long long>(read_offset), bytes_read = std::atomic_ref<long long>(bytes_read)]
@@ -229,7 +232,7 @@ namespace
 
 				auto i = ((po - o) + 1) % num_buffers;
 
-				auto offset = read_offset.fetch_add(buffer_size, std::memory_order::relaxed);
+				auto offset = read_offset.fetch_add(read_size, std::memory_order::relaxed);
 
 				if (offset >= file_size.QuadPart)
 					break;
@@ -239,7 +242,7 @@ namespace
 					.OffsetHigh = static_cast<DWORD>(offset >> 32),
 				};
 
-				ReadFile(file, buffer + i * buffer_size, buffer_size, nullptr, o + i);
+				ReadFile(file, buffer + i * buffer_size, read_size, nullptr, o + i);
 				if (DWORD err = GetLastError(); err != ERROR_IO_PENDING)
 					throw_last_error(err);
 			}

@@ -114,6 +114,7 @@ namespace
 	template <int num_buffers = 4>
 	auto consume(const std::filesystem::path& path, auto&& sink)
 	{
+		std::clog << "reading " << path.string() << '\n' << std::flush;
 
 		const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING, nullptr);
 
@@ -122,6 +123,8 @@ namespace
 
 
 		auto volume_path = get_volume_name(get_volume_path(path));
+
+		std::clog << "   on " << volume_path.string() << '\n' << std::flush;
 
 		const HANDLE volume = CreateFileW(volume_path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
 
@@ -137,6 +140,7 @@ namespace
 				throw_last_error();
 		}
 
+		std::clog << "   physical sector size " << storage_alignment_desc.BytesPerPhysicalSector << " B\n" << std::flush;
 
 		LARGE_INTEGER file_size;
 		if (!GetFileSizeEx(file, &file_size))
@@ -147,6 +151,8 @@ namespace
 		const long long buffer_alignment = std::lcm(storage_alignment_desc.BytesPerPhysicalSector, std::bit_ceil(storage_alignment_desc.BytesPerPhysicalSector));
 		const long long buffer_size = (read_size + buffer_alignment - 1) / buffer_alignment * buffer_alignment;
 		auto buffer = static_cast<std::byte*>(::operator new(buffer_size * num_buffers, std::align_val_t(buffer_alignment)));
+
+		std::clog << "   using " << num_buffers << " buffers sized " << buffer_size << " alignment " << buffer_alignment << " for read size " << read_size << '\n' << std::flush;
 
 #if 1
 		// IORING_CAPABILITIES caps;

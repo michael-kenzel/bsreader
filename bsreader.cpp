@@ -109,21 +109,10 @@ namespace
 		});
 		return std::filesystem::path(std::move(buffer));
 	}
-}
 
-int main(int argc, char** argv)
-{
-	try
+	template <int num_buffers = 4>
+	auto consume(const std::filesystem::path& path, auto&& sink)
 	{
-		if (argc != 2)
-		{
-			std::cerr << "usage: bsreader <file name>\n";
-			return -1;
-		}
-
-		auto path = std::filesystem::path(argv[1]);
-
-		auto start = std::chrono::steady_clock::now();
 
 		const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING, nullptr);
 
@@ -265,7 +254,26 @@ int main(int argc, char** argv)
 		for (auto&& t : threads)
 			t.join();
 #endif
+		return bytes_read;
+	}
+}
 
+int main(int argc, char** argv)
+{
+	try
+	{
+		if (argc != 2)
+		{
+			std::cerr << "usage: bsreader <file name>\n";
+			return -1;
+		}
+
+		auto path = std::filesystem::path(argv[1]);
+
+		auto start = std::chrono::steady_clock::now();
+
+		auto bytes_read = consume(path, []()
+		{
 		// std::vector<double> stars;
 		// for (auto ptr = bytes + 256; ptr < bytes + file_size.QuadPart; ptr += 33)
 		// {
@@ -280,14 +288,15 @@ int main(int argc, char** argv)
 
 		// 	stars.push_back(x);
 		// }
+		});
 
 		auto end = std::chrono::steady_clock::now();
 
 		auto t = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-		std::cout << "read " << bytes_read * 1.0 / (1024 * 1024 * 1024) << " GiB in " << t * 0.001 << " s (" << bytes_read * 1000.0 / (1024 * 1024 * 1024 * t) << " GiB/s)\n";
+		std::clog << "read " << bytes_read / (1024.0 * 1024.0 * 1024.0) << " GiB in " << t * 0.001 << " s (" << bytes_read * 1000.0 / (1024.0 * 1024.0 * 1024.0 * t) << " GiB/s)\n";
 
-		// std::cout << n << " stars " << std::chrono::duration_cast<std::chrono::seconds>(end - start).count() << "s\n";
+		// std::clog << n << " stars " << std::chrono::duration_cast<std::chrono::seconds>(end - start).count() << "s\n";
 	}
 	catch (const win32error& e)
 	{

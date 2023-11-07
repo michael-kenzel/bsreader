@@ -167,38 +167,47 @@ namespace
 		throw_error(BuildIoRingRegisterBuffers(ioring, 1, &buffer_info, 2));
 
 		throw_error(SubmitIoRing(ioring, 2, INFINITE, nullptr));
-
-		IORING_CQE cqe;
-		throw_error(PopIoRingCompletion(ioring, &cqe));
-		throw_error(cqe.ResultCode);
-		throw_error(PopIoRingCompletion(ioring, &cqe));
-		throw_error(cqe.ResultCode);
+		{
+			IORING_CQE cqe;
+			throw_error(PopIoRingCompletion(ioring, &cqe));
+			throw_error(cqe.ResultCode);
+			throw_error(PopIoRingCompletion(ioring, &cqe));
+			throw_error(cqe.ResultCode);
+		}
 
 		long long read_offset = 0;
+		long long bytes_read = 0;
+		long long active_read_size[num_buffers];
 
-		for (int i = 0; i < num_buffers; ++i)
+		for (int i = 0; i < num_buffers && read_offset < file_size.QuadPart; ++i)
 		{
 			throw_error(BuildIoRingReadFile(ioring, IoRingHandleRefFromIndex(0), IoRingBufferRefFromIndexAndOffset(0, i * buffer_size), read_size, read_offset, i, IOSQE_FLAGS_NONE));
 			read_offset += read_size;
 		}
 
-		while (true)
+		while (bytes_read != file_size.QuadPart)
 		{
 			throw_error(SubmitIoRing(ioring, 1, INFINITE, nullptr));
 
+			IORING_CQE cqe;
 			throw_error(PopIoRingCompletion(ioring, &cqe));
 
+			if (cqe.ResultCode == HRESULT_FROM_WIN32(ERROR_HANDLE_EOF))
+				continue;
+
 			if (cqe.ResultCode != S_OK)
-				break;
+				throw_error(cqe.ResultCode);
 
-			long long num_bytes = std::min<long long>(file_size.QuadPart - read_offset, read_size);
+			int i = static_cast<int>(cqe.UserData);
 
-			int i = cqe.UserData;
-			throw_error(BuildIoRingReadFile(ioring, IoRingHandleRefFromIndex(0), IoRingBufferRefFromIndexAndOffset(0, i * buffer_size), num_bytes, read_offset, i, IOSQE_FLAGS_NONE));
-			read_offset += num_bytes;
+			bytes_read += cqe.Information;
+
+			if (read_offset < file_size.QuadPart)
+			{
+				throw_error(BuildIoRingReadFile(ioring, IoRingHandleRefFromIndex(0), IoRingBufferRefFromIndexAndOffset(0, i * buffer_size), read_size, read_offset, i, IOSQE_FLAGS_NONE));
+				read_offset += read_size;
+			}
 		}
-
-		long long bytes_read = read_offset;
 #else
 		HANDLE iocp = CreateIoCompletionPort(file, 0, 0, 0);
 
@@ -211,7 +220,7 @@ namespace
 
 		OVERLAPPED o[num_buffers] = {};
 
-		for (int i = 0; i < num_buffers; ++i)
+		for (int i = 0; i < num_buffers && read_offset < file_size.QuadPart; ++i)
 		{
 			o[i] = {
 				.Offset = static_cast<DWORD>(read_offset & 0xFFFFFFFF),
@@ -226,42 +235,43 @@ namespace
 
 		auto read = [&, read_offset = std::atomic_ref<long long>(read_offset), bytes_read = std::atomic_ref<long long>(bytes_read)]
 		{
-			while (true)
+			while (bytes_read.load(std::memory_order::relaxed) != file_size.QuadPart)
 			{
 				OVERLAPPED* po;
 				DWORD bytes_transferred;
 				ULONG_PTR key;
 				if (!GetQueuedCompletionStatus(iocp, &bytes_transferred, &key, &po, INFINITE))
-					break;
+				{
+					if (DWORD err = GetLastError(); err == ERROR_ABANDONED_WAIT_0)
+						break;
+					else
+						throw_last_error(err);
+				}
 
-				bytes_read.fetch_add(bytes_transferred, std::memory_order::relaxed);
+				if (bytes_read.fetch_add(bytes_transferred, std::memory_order::relaxed) + bytes_transferred == file_size.QuadPart)
+					CloseHandle(iocp);
 
 				auto i = ((po - o) + 1) % num_buffers;
 
-				auto offset = read_offset.fetch_add(read_size, std::memory_order::relaxed);
+				if (auto offset = read_offset.fetch_add(read_size, std::memory_order::relaxed); offset < file_size.QuadPart)
+				{
+					o[i] = {
+						.Offset = static_cast<DWORD>(offset & 0xFFFFFFFF),
+						.OffsetHigh = static_cast<DWORD>(offset >> 32),
+					};
 
-				if (offset >= file_size.QuadPart)
-					break;
-
-				o[i] = {
-					.Offset = static_cast<DWORD>(offset & 0xFFFFFFFF),
-					.OffsetHigh = static_cast<DWORD>(offset >> 32),
-				};
-
-				ReadFile(file, buffer + i * buffer_size, read_size, nullptr, o + i);
-				if (DWORD err = GetLastError(); err != ERROR_IO_PENDING)
-					throw_last_error(err);
+					ReadFile(file, buffer + i * buffer_size, read_size, nullptr, o + i);
+					if (DWORD err = GetLastError(); err != ERROR_IO_PENDING)
+						throw_last_error(err);
+				}
 			}
 		};
 
-		std::thread threads[] = {
-			std::thread(read), std::thread(read), std::thread(read)
+		std::jthread threads[] = {
+			std::jthread(read), std::jthread(read), std::jthread(read)
 		};
 
 		read();
-
-		for (auto&& t : threads)
-			t.join();
 #endif
 		return bytes_read;
 	}

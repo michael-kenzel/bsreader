@@ -161,10 +161,10 @@ namespace
 		HIORING ioring;
 		throw_error(CreateIoRing(IORING_VERSION_3, {}, 1024, 1024, &ioring));
 
-		throw_error(BuildIoRingRegisterFileHandles(ioring, 1, &file, 1));
+		throw_error(BuildIoRingRegisterFileHandles(ioring, 1, &file, -1));
 
-		IORING_BUFFER_INFO buffer_info = { buffer, static_cast<UINT32>(buffer_size*num_buffers) };
-		throw_error(BuildIoRingRegisterBuffers(ioring, 1, &buffer_info, 2));
+		IORING_BUFFER_INFO buffer_info = { buffer, static_cast<UINT32>(buffer_size * num_buffers) };
+		throw_error(BuildIoRingRegisterBuffers(ioring, 1, &buffer_info, -2));
 
 		throw_error(SubmitIoRing(ioring, 2, INFINITE, nullptr));
 		{
@@ -213,7 +213,6 @@ namespace
 
 		if (!iocp)
 			throw_last_error();
-
 
 		long long read_offset = 0;
 		long long bytes_read = 0;
@@ -319,7 +318,7 @@ int main(int argc, char** argv)
 	}
 	catch (const win32error& e)
 	{
-		std::cerr << "ERROR: 0x" << std::hex << e.error_code << '\n';
+		std::cerr << "ERROR 0x" << std::hex << e.error_code << '\n';
 		return -1;
 	}
 	catch (const std::exception& e)

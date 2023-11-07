@@ -152,7 +152,7 @@ namespace
 		const long long buffer_size = (read_size + buffer_alignment - 1) / buffer_alignment * buffer_alignment;
 		auto buffer = static_cast<std::byte*>(::operator new(buffer_size * num_buffers, std::align_val_t(buffer_alignment)));
 
-		std::clog << "   using " << num_buffers << " buffers sized " << buffer_size << " alignment " << buffer_alignment << " for read size " << read_size << '\n' << std::flush;
+		std::clog << "   using " << num_buffers << " buffers sized " << buffer_size << " B alignment " << buffer_alignment << " read size " << read_size << " B to read " << file_size.QuadPart << " B\n" << std::flush;
 
 #if 1
 		// IORING_CAPABILITIES caps;
